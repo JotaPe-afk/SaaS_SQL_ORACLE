@@ -1,0 +1,672 @@
+-- CORRIGIR transfere_departamento / promove_empregado / reajusta_salario
+-- ta dando problema com o trg_emp_valida, ele da erro de tabela mutante, quando tenta fazer
+-- update ou insert o trigger dispara e abre a tabela com o select dentro dele, ai tenta
+-- fazer um update em uma tabela aberta dando erro na execucao
+
+-- RESOLVIDO - o campo email foi alterado para UNIQUE e o select removido do trigger
+
+-- PASSO 3 =====================================================================
+CREATE OR REPLACE TRIGGER trg_emp_valida BEFORE
+    INSERT OR UPDATE ON empregados
+    FOR EACH ROW
+DECLARE
+    v_count NUMBER;
+    v_min   NUMBER;
+    v_max   NUMBER;
+BEGIN
+
+
+-- 3.1 ---------------------------- VERIF: Telefone ----------------------------
+    :new.telefone := regexp_replace(:new.telefone, '[^0-9]', '');
+    
+    IF length(:new.telefone) < 10 THEN
+        raise_application_error(-20004, 'Telefone invalido');
+    END IF;
+
+
+-- 3.2 ---------------------------- VERIF: Admissao ----------------------------
+    IF :new.data_admissao > sysdate OR extract(YEAR FROM :new.data_admissao) < 1900 THEN
+        raise_application_error(-20005, 'Data invalida');
+    END IF;
+
+
+-- 3.3 ---------------- VERIF: @, Unique e converte para lower -----------------
+    :new.email := lower(:new.email);
+    
+    IF instr(:new.email, '@') = 0 OR :new.email IS NULL THEN
+        raise_application_error(-20001, 'Email invalido');
+    END IF;
+
+
+-- 3.4/5 ------------------------ VERIF: Faixa salario -------------------------
+    SELECT salario_min, salario_max
+      INTO v_min, v_max
+      FROM cargos
+     WHERE id_cargo = :new.id_cargo;
+     
+    IF :new.salario NOT BETWEEN v_min AND v_max THEN
+        raise_application_error(-20003, 'Salario fora da faixa');
+    END IF;
+    
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            raise_application_error(-20006, 'Cargo nao existe');
+END;
+
+
+-- PASSO 4 =====================================================================
+CREATE OR REPLACE TRIGGER trg_emp_aud AFTER
+    INSERT OR DELETE OR UPDATE ON empregados
+    FOR EACH ROW
+DECLARE
+    PRAGMA AUTONOMOUS_TRANSACTION;
+    v_emp auditoria_empregados%rowtype;
+BEGIN
+
+    -- INSERT ===================================
+    IF inserting THEN
+        v_emp.id_empregado    := :new.id_empregado;
+        v_emp.nome            := :new.nome;
+        v_emp.sobrenome       := :new.sobrenome;
+        v_emp.email           := :new.email;
+        v_emp.telefone        := :new.telefone;
+        v_emp.id_cargo        := :new.id_cargo;
+        v_emp.salario         := :new.salario;
+        v_emp.id_departamento := :new.id_departamento;
+        v_emp.comissao        := :new.comissao;
+        v_emp.data_alteracao  := sysdate;
+        v_emp.operacao        := 'INSERT';
+        
+
+    -- UPDATE ===================================
+    ELSIF updating THEN
+        v_emp.id_empregado    := :new.id_empregado;
+        v_emp.nome            := :new.nome;
+        v_emp.sobrenome       := :new.sobrenome;
+        v_emp.email           := :new.email;
+        v_emp.telefone        := :new.telefone;
+        v_emp.id_cargo        := :new.id_cargo;
+        v_emp.salario         := :new.salario;
+        v_emp.id_departamento := :new.id_departamento;
+        v_emp.comissao        := :new.comissao;
+        v_emp.data_alteracao  := sysdate;
+        v_emp.operacao        := 'UPDATE';
+
+
+    -- DELETE =====================================
+    ELSIF deleting THEN
+        v_emp.id_empregado    := :old.id_empregado;
+        v_emp.nome            := :old.nome;
+        v_emp.sobrenome       := :old.sobrenome;
+        v_emp.email           := :old.email;
+        v_emp.telefone        := :old.telefone;
+        v_emp.id_cargo        := :old.id_cargo;
+        v_emp.salario         := :old.salario;
+        v_emp.id_departamento := :old.id_departamento;
+        v_emp.comissao        := :old.comissao;
+        v_emp.data_alteracao  := sysdate;
+        v_emp.operacao        := 'DELETE';
+    END IF;
+
+    INSERT INTO auditoria_empregados VALUES v_emp;
+    COMMIT;
+    
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+END trg_emp_aud;
+
+update empregados set nome = 'Aninha' where id_empregado = 30;
+
+-- PASSO 5 =====================================================================
+CREATE OR REPLACE TRIGGER cargo_valida BEFORE
+    UPDATE ON cargos
+    FOR EACH ROW
+DECLARE
+    v_count number;
+BEGIN
+
+    IF :old.salario_min != :new.salario_min or 
+       :old.salario_max != :new.salario_max THEN
+       
+        SELECT COUNT(*)
+          INTO v_count
+          FROM empregados
+         WHERE id_cargo = :new.id_cargo 
+           AND (salario < :new.salario_min 
+            OR salario > :new.salario_max);
+    END IF;
+    
+    
+    IF v_count > 0 THEN
+        raise_application_error(-20003, 'Salario fora da faixa');
+    END IF;
+END;
+
+
+-- PASSO 6 =====================================================================
+CREATE OR REPLACE PACKAGE pkg_gestao_empregados AS
+    PROCEDURE contrata_empregado (
+        id_emp        empregados.id_empregado%TYPE,
+        nome_emp      empregados.nome%TYPE,
+        sobrenome_emp empregados.sobrenome%TYPE,
+        email_emp     empregados.email%TYPE,
+        tel_emp       empregados.telefone%TYPE,
+        data_adm_emp  empregados.data_admissao%TYPE,
+        cargo_emp     empregados.id_cargo%TYPE,
+        sal_emp       empregados.salario%TYPE,
+        dep_emp       empregados.id_departamento%TYPE,
+        comissao_emp  empregados.comissao%TYPE);
+
+
+    PROCEDURE demite_empregado (
+        id_emp empregados.id_empregado%TYPE);
+
+
+    PROCEDURE transfere_departamento (
+        id_emp   empregados.id_empregado%TYPE,
+        dep_novo empregados.id_departamento%TYPE);
+
+
+    PROCEDURE promove_empregado (
+        id_emp        empregados.id_empregado%TYPE,
+        novo_id_cargo empregados.id_cargo%TYPE,
+        novo_salario  empregados.salario%TYPE);
+
+
+    PROCEDURE reajusta_salario (
+        id_emp     empregados.id_empregado%TYPE,
+        porcentual NUMBER);
+    
+-----------------------------------------------------------
+
+    FUNCTION calcula_tempo_empresa (
+        id_emp empregados.id_empregado%TYPE
+    ) RETURN VARCHAR2;
+    
+    
+    FUNCTION calcula_salario_anual (
+        id_emp empregados.id_empregado%TYPE
+    ) RETURN NUMBER;
+    
+    
+    FUNCTION conta_empregados_departamento (
+        id_dep empregados.id_departamento%TYPE
+    ) RETURN NUMBER;
+    
+    
+END pkg_gestao_empregados;
+/
+CREATE OR REPLACE PACKAGE BODY pkg_gestao_empregados AS
+-- PASSO 7 =====================================================================
+-- Contrata --------------------------------------------------------------------
+    PROCEDURE contrata_empregado (
+        id_emp        empregados.id_empregado%TYPE,
+        nome_emp      empregados.nome%TYPE,
+        sobrenome_emp empregados.sobrenome%TYPE,
+        email_emp     empregados.email%TYPE,
+        tel_emp       empregados.telefone%TYPE,
+        data_adm_emp  empregados.data_admissao%TYPE,
+        cargo_emp     empregados.id_cargo%TYPE,
+        sal_emp       empregados.salario%TYPE,
+        dep_emp       empregados.id_departamento%TYPE,
+        comissao_emp  empregados.comissao%TYPE
+    ) IS
+        v_count NUMBER;
+    BEGIN
+        SELECT COUNT(*)
+          INTO v_count
+          FROM departamentos
+         WHERE id_departamento = dep_emp;
+
+        IF v_count = 0 THEN
+            raise_application_error(-20007, 'DEPARTAMENTO INEXISTENTE');
+        END IF;
+
+
+        SELECT COUNT(*)
+          INTO v_count
+          FROM cargos
+         WHERE id_cargo = cargo_emp;
+    
+        IF v_count = 0 THEN
+            raise_application_error(-20009, 'CARGO INEXISTENTE');
+        END IF;
+
+
+        INSERT INTO empregados VALUES (
+            id_emp,
+            nome_emp,
+            sobrenome_emp,
+            email_emp,
+            tel_emp,
+            data_adm_emp,
+            cargo_emp,
+            sal_emp,
+            dep_emp,
+            comissao_emp
+        );
+        
+    END contrata_empregado;
+
+
+-- Demite ----------------------------------------------------------------------
+    PROCEDURE demite_empregado (
+        id_emp empregados.id_empregado%TYPE
+    ) IS
+        v_count NUMBER;
+    BEGIN
+    
+        SELECT COUNT(*)
+          INTO v_count
+          FROM empregados
+         WHERE id_empregado = id_emp;
+         
+        IF v_count = 0 THEN
+            raise_application_error(-20008, 'NAO ENCONTRADO');
+        END IF;
+        
+        DELETE FROM empregados
+         WHERE id_empregado = id_emp;
+         
+    END demite_empregado;
+
+
+-- Transfere -------------------------------------------------------------------
+    PROCEDURE transfere_departamento (
+        id_emp   empregados.id_empregado%TYPE,
+        dep_novo empregados.id_departamento%TYPE
+    ) IS
+        v_count NUMBER;
+    BEGIN
+        SELECT COUNT(*)
+          INTO v_count
+          FROM departamentos
+         WHERE id_departamento = dep_novo;
+    
+        IF v_count = 0 THEN
+            raise_application_error(-20007, 'DEPARTAMENTO INEXISTENTE');
+        END IF;
+        
+        UPDATE empregados 
+           SET id_departamento = dep_novo 
+         WHERE id_empregado = id_emp;
+         
+    END transfere_departamento;
+    
+
+-- Promove ---------------------------------------------------------------------
+    PROCEDURE promove_empregado (
+        id_emp        empregados.id_empregado%TYPE,
+        novo_id_cargo empregados.id_cargo%TYPE,
+        novo_salario  empregados.salario%TYPE
+    ) IS
+    BEGIN
+        UPDATE empregados
+           SET id_cargo = novo_id_cargo,
+               salario = novo_salario
+         WHERE id_empregado = id_emp;
+         
+    END promove_empregado;
+
+
+-- Reajusta --------------------------------------------------------------------
+    PROCEDURE reajusta_salario (
+        id_emp     empregados.id_empregado%TYPE,
+        porcentual NUMBER
+    ) IS
+        v_sal     empregados.salario%TYPE;
+        v_max_sal cargos.salario_max%TYPE;
+    BEGIN
+        SELECT salario * (1 + porcentual / 100),
+               (SELECT salario_max FROM cargos WHERE id_cargo = empregados.id_cargo)
+          INTO v_sal, v_max_sal
+          FROM empregados
+         WHERE id_empregado = id_emp;
+         
+            IF v_sal > v_max_sal THEN
+                v_sal := v_max_sal;
+            END IF;
+            
+        UPDATE empregados
+           SET salario = v_sal
+         WHERE id_empregado = id_emp;
+         
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                DBMS_OUTPUT.PUT_LINE('Empregado não encontrado');
+           
+    END reajusta_salario;
+    
+    
+-- FUNCTIONS -------------------------------------------------------------------
+-- Tempo Empresa ---------------------------------------------------------------
+    FUNCTION calcula_tempo_empresa (
+        id_emp empregados.id_empregado%TYPE
+    ) RETURN VARCHAR2 IS
+        v_data empregados.data_admissao%TYPE;
+    BEGIN
+        SELECT data_admissao
+          INTO v_data
+          FROM empregados
+         WHERE id_empregado = id_emp;
+
+    RETURN 
+        TRUNC(MONTHS_BETWEEN(SYSDATE, v_data) / 12) || ' anos, ' ||
+        TRUNC(MOD(MONTHS_BETWEEN(SYSDATE, v_data), 12)) || ' meses e ' ||
+        TRUNC(SYSDATE - ADD_MONTHS(v_data, 
+        TRUNC(MONTHS_BETWEEN(SYSDATE, v_data)))) || ' dias';
+        
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                DBMS_OUTPUT.PUT_LINE('Empregado não encontrado');
+        
+    END calcula_tempo_empresa;
+    
+    
+-- Salario Anual ---------------------------------------------------------------
+    FUNCTION calcula_salario_anual (
+        id_emp empregados.id_empregado%TYPE
+    ) RETURN NUMBER IS
+        v_sal empregados.salario%TYPE;
+        v_com empregados.comissao%TYPE;
+    BEGIN
+        SELECT salario, comissao
+          INTO v_sal, v_com
+          FROM empregados
+         WHERE id_empregado = id_emp;
+         
+        RETURN (v_sal + NVL(v_com, 0)) * 12;
+        
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                DBMS_OUTPUT.PUT_LINE('Empregado não encontrado');
+        
+    END calcula_salario_anual;
+    
+    
+-- Total Empregados Dep --------------------------------------------------------
+    FUNCTION conta_empregados_departamento (
+        id_dep empregados.id_departamento%TYPE
+    ) RETURN NUMBER IS
+        v_count NUMBER;
+    BEGIN
+        SELECT COUNT(*)
+          INTO v_count
+          FROM empregados
+         WHERE id_departamento = id_dep;
+         
+         RETURN v_count;
+         
+         EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                DBMS_OUTPUT.PUT_LINE('Departamento não encontrado');
+         
+    END conta_empregados_departamento; 
+    
+END pkg_gestao_empregados;
+
+
+
+-- PASSO 8 =====================================================================
+CREATE OR REPLACE PACKAGE pkg_relatorios_rh AS
+
+    PROCEDURE relatorio_empregados_por_pais (
+        v_cursor OUT SYS_REFCURSOR);
+        
+        
+    PROCEDURE relatorio_folha_pagamento (
+        v_cursor OUT SYS_REFCURSOR);
+        
+        
+    PROCEDURE relatorio_faixa_salarial(
+        v_cursor OUT SYS_REFCURSOR);
+    
+END pkg_relatorios_rh;
+/
+CREATE OR replace package body pkg_relatorios_rh as
+-- PASSO 9 =====================================================================
+-- Relatorio Pais --------------------------------------------------------------
+    PROCEDURE relatorio_empregados_por_pais (
+        v_cursor OUT SYS_REFCURSOR
+    ) IS 
+    BEGIN
+        OPEN v_cursor FOR SELECT emp.nome,
+                                 emp.sobrenome,
+                                 emp.id_cargo,
+                                 emp.salario,
+                                 dep.nome_departamento,
+                                 loc.cidade,
+                                 pais.nome_pais
+                            FROM empregados emp
+                            JOIN departamentos dep ON dep.id_departamento = emp.id_departamento
+                            JOIN localizacoes loc ON loc.id_localizacao = dep.id_localizacao
+                            JOIN paises pais ON pais.id_pais = loc.id_pais
+                           ORDER BY pais.nome_pais, loc.cidade, dep.id_departamento;
+    END relatorio_empregados_por_pais;
+
+
+-- Relatorio Pagamento ---------------------------------------------------------
+    PROCEDURE relatorio_folha_pagamento (
+        v_cursor OUT SYS_REFCURSOR
+    ) IS 
+    BEGIN 
+        OPEN v_cursor FOR SELECT dep.nome_departamento,
+                                 COUNT(emp.id_empregado) AS empregados,
+                                 SUM(emp.salario)        AS total_salario,
+                                 round(AVG(emp.salario)) AS media_sal,
+                                 MIN(emp.salario)        AS salario_min,
+                                 MAX(emp.salario)        AS salario_max
+                            FROM empregados emp
+                            JOIN departamentos dep ON dep.id_departamento = emp.id_departamento
+                           GROUP BY dep.nome_departamento;
+    END relatorio_folha_pagamento;
+
+
+-- Relatorio Salarial ----------------------------------------------------------
+    PROCEDURE relatorio_faixa_salarial(
+        v_cursor OUT SYS_REFCURSOR 
+    ) IS
+    BEGIN
+        OPEN v_cursor FOR SELECT faixa_salarial, 
+                                 count(id_empregado) as total_empregado
+                            FROM (SELECT id_empregado,
+                                    CASE WHEN salario BETWEEN 0    AND 3000  THEN '0-3000'
+                                         WHEN salario BETWEEN 3001 AND 6000  THEN '3001-6000'
+                                         WHEN salario BETWEEN 6001 AND 10000 THEN '6001-10000'
+                                         ELSE '10001+'
+                                     END faixa_salarial
+                                    FROM empregados)
+                           GROUP BY faixa_salarial;
+    END relatorio_faixa_salarial;
+END pkg_relatorios_rh;
+
+
+-- PASSO 10 ====================================================================
+-- SELECT 1 / localização completa ---------------------------------------------
+SELECT emp.nome,
+       emp.sobrenome,
+       car.nome_cargo AS cargo,
+       dep.nome_departamento,
+       loc.cidade,
+       pais.nome_pais
+  FROM empregados     emp
+  JOIN cargos         car ON car.id_cargo = emp.id_cargo
+  JOIN departamentos  dep ON dep.id_departamento = emp.id_departamento
+  JOIN localizacoes   loc ON loc.id_localizacao = dep.id_localizacao
+  JOIN paises        pais ON pais.id_pais = loc.id_pais;
+  
+  
+-- SELECT 2 / Salário acima da média por departamento --------------------------
+SELECT *
+  FROM empregados emp1
+ WHERE emp1.salario > (
+    SELECT AVG(salario)
+      FROM empregados emp2
+     WHERE emp1.id_departamento = emp2.id_departamento);
+    
+
+-- SELECT 3 / Ranking salarial por departamento --------------------------------
+SELECT *
+  FROM (SELECT nome,
+               sobrenome,
+               id_departamento,
+               salario,
+               RANK() OVER(PARTITION BY id_departamento 
+                      ORDER BY salario DESC) as rank
+          FROM EMPREGADOS)
+ WHERE rank <= 3;
+
+
+-- SELECT 4 / Total de empregados por país--------------------------------------
+SELECT COUNT(emp.id_empregado) AS empregados,
+       ROUND(AVG(emp.salario)) AS media,
+       pais.nome_pais
+  FROM empregados     emp
+  JOIN departamentos  dep ON dep.id_departamento = emp.id_departamento
+  JOIN localizacoes   loc ON loc.id_localizacao = dep.id_localizacao
+  JOIN paises        pais ON pais.id_pais = loc.id_pais
+ GROUP BY pais.nome_pais;
+
+
+-- SELECT 5  / Cargos sem empregados--------------------------------------------
+SELECT *
+  FROM cargos car
+ WHERE NOT EXISTS (
+    SELECT *
+      FROM empregados emp
+     WHERE emp.id_cargo = car.id_cargo);
+
+
+-- SELECT 6  / Empregados admitidos no último ano ------------------------------
+SELECT TO_CHAR(data_admissao, 'MM') AS mes,
+       COUNT(*) AS total
+  FROM empregados
+ WHERE data_admissao <= sysdate - 2190
+ GROUP BY TO_CHAR(data_admissao, 'MM')
+ ORDER BY mes;
+ 
+ 
+-- SELECT 7 / Departamentos com maior folha ------------------------------------
+SELECT id_departamento AS dep,
+       SUM(salario)    AS soma_sal,
+       ROUND(SUM(salario) / (SELECT SUM(salario) FROM empregados) * 100) || '%' AS porcentual
+  FROM empregados
+ GROUP BY id_departamento
+ ORDER BY soma_sal DESC;
+ 
+
+-- SELECT 8 / Análise de tempo de casa -----------------------------------------
+SELECT id_departamento AS dep,
+       ROUND(AVG(months_between(sysdate, data_admissao))) AS media_meses
+  FROM empregados
+ GROUP BY id_departamento
+ ORDER BY id_departamento;
+ 
+
+
+-- PASSO 11 ====================================================================
+-- VIEW 1 ----------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_empregados_completo AS
+    SELECT emp.*,
+           dep.nome_departamento,
+           loc.cidade,
+           paises.nome_pais
+      FROM empregados emp
+      JOIN departamentos dep ON dep.id_departamento = emp.id_departamento
+      JOIN localizacoes  loc ON loc.id_localizacao = dep.id_localizacao
+      JOIN paises ON paises.id_pais = loc.id_pais;
+SELECT * FROM v_empregados_completo;
+
+
+-- VIEW 2 ----------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_dashboard_rh AS
+     SELECT COUNT(emp.id_empregado)             AS total_emp,
+            SUM(emp.salario)                    AS total_sal,
+            round(AVG(emp.salario))             AS media_sal,
+            COUNT(DISTINCT dep.id_departamento) AS total_dep,
+            count(DISTINCT pais.id_pais)        AS total_paises
+       FROM empregados    emp
+       JOIN departamentos dep  ON dep.id_departamento = emp.id_departamento
+       JOIN localizacoes  loc  ON loc.id_localizacao = dep.id_localizacao
+       JOIN paises        pais ON pais.id_pais = loc.id_pais;
+SELECT * FROM v_dashboard_rh;
+
+
+-- PASSO 12 ====================================================================
+CREATE OR REPLACE PROCEDURE reajustar_departamento_massa (
+    id_dep              departamentos.id_departamento%TYPE,
+    percentual_reajuste NUMBER
+) AS
+
+    CURSOR cr_emp IS
+    SELECT emp.*, car.salario_max FROM empregados emp
+      JOIN cargos car on car.id_cargo = emp.id_cargo
+     WHERE emp.id_departamento = id_dep;
+
+    TYPE tb_emp IS
+        TABLE OF cr_emp%rowtype;
+    v_tb_emp tb_emp;
+      
+    v_novo_sal empregados.salario%TYPE;
+    v_max      cargos.salario_max%TYPE;
+    v_total    NUMBER := 0;
+
+BEGIN 
+    OPEN cr_emp;
+    
+    LOOP
+        FETCH cr_emp BULK COLLECT INTO v_tb_emp LIMIT 5000;
+        EXIT WHEN v_tb_emp.count = 0;
+            
+        FOR x in 1.. v_tb_emp.count LOOP
+        
+            v_novo_sal := v_tb_emp(x).salario * (1 + percentual_reajuste / 100);
+            v_max := v_tb_emp(x).salario_max;
+            
+            v_total := v_total + 1;
+            
+             IF v_novo_sal > v_max THEN
+                v_novo_sal := v_max;
+             END IF;
+             
+             UPDATE empregados
+                SET salario = v_novo_sal
+              WHERE id_empregado = v_tb_emp(x).id_empregado;
+              
+        END LOOP;
+    END LOOP;
+    
+    CLOSE cr_emp;
+    
+    DBMS_OUTPUT.PUT_LINE(v_total || ' empregados reajustados');
+   
+END reajustar_departamento_massa;
+
+-- PASSO 13 ====================================================================
+CREATE OR REPLACE FUNCTION analisar_equidade_salarial (
+    id_car cargos.id_cargo%TYPE
+) RETURN VARCHAR2 IS
+    v_min empregados.salario%TYPE;
+    v_max empregados.salario%TYPE;
+    v_porc NUMBER;
+BEGIN
+    SELECT MAX(salario), MIN(salario) 
+      INTO v_max, v_min 
+      FROM empregados
+     WHERE id_cargo = id_car;
+     
+     IF v_min = 0 THEN
+        RETURN 'INVALIDO';
+     END IF;
+     
+     v_porc := (v_max - v_min) / v_min * 100;
+     
+     IF v_porc < 30 THEN
+        RETURN 'EQUITATIVO: ' || ROUND(v_porc) || '%';
+     ELSIF v_porc BETWEEN 30 AND 50 THEN
+        RETURN 'MODERADO: ' || ROUND(v_porc) || '%';
+     ELSE
+        RETURN 'DESIGUAL: ' || ROUND(v_porc) || '%';
+     END IF;
+END;
