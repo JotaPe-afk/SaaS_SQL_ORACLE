@@ -11,7 +11,7 @@ Projeto desenvolvido com foco em prática de modelagem de banco de dados e manip
 
 * Criação de relatórios personalizados
 * Relacionamentos entre entidades
-* Consultas SQL (simples e avançadas)
+* Consultas SQL
 * Procedures e packages básicas
 
 ## Objetivo
